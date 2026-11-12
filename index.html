@@ -1,0 +1,134 @@
+<!doctype html><html lang="fr"><meta charset="utf-8"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Analyse d'échecs</title>
+<style>
+:root{color-scheme:dark}
+body{font:15px system-ui,sans-serif;background:#262421;color:#eee;margin:0;padding:8px}
+input,button{font:inherit;padding:8px 12px;border-radius:6px;border:0}button{background:#5d9948;color:#fff;cursor:pointer}
+#app{display:flex;flex-wrap:wrap;gap:12px;margin-top:8px}.col{flex:1 1 300px;min-width:280px}
+#wrap{display:flex;gap:6px}#bar{width:18px;background:#222;border-radius:4px;position:relative;overflow:hidden}#bw{position:absolute;bottom:0;left:0;right:0;background:#eee}
+#bd{display:grid;grid-template-columns:repeat(8,1fr);width:min(88vw,520px);aspect-ratio:1}
+.sq{display:flex;align-items:center;justify-content:center;font-size:min(8vw,46px);line-height:1}.l{background:#ebecd0}.d{background:#779556}.hl{box-shadow:inset 0 0 0 99px #ffe03a88}
+.w{color:#fff;text-shadow:0 0 2px #000,0 0 2px #000,0 0 1px #000}.b{color:#111}
+#games{max-height:240px;overflow:auto;border:1px solid #444;border-radius:6px}.g{padding:6px 8px;border-bottom:1px solid #333;cursor:pointer}.g:hover{background:#333}
+#moves{display:flex;flex-wrap:wrap;gap:3px 6px;max-height:210px;overflow:auto;margin:8px 0}.mv{cursor:pointer;padding:1px 4px;border-radius:4px}.mv.on{outline:2px solid #fff}
+table{border-collapse:collapse}td,th{padding:3px 8px;text-align:center}.cl{cursor:pointer;text-decoration:underline dotted}
+#info{background:#1d1c1a;padding:8px;border-radius:6px;min-height:60px;margin:6px 0}.nav button{margin-right:4px;background:#444}
+</style>
+<body>
+<form id="f"><input id="u" placeholder="Pseudo chess.com" autocapitalize="off" autocorrect="off"> <button>Charger mes parties</button> <select id="dp" title="Profondeur"><option>14<option selected>16<option>18<option>20<option>22</select> <span id="st"></span></form>
+<div id="app"><div class="col" id="left"><div id="games"></div></div>
+<div class="col" style="flex:2 1 340px"><div id="top"></div><div id="wrap"><div id="bar"><div id="bw" style="height:50%"></div></div><div id="bd"></div></div>
+<div class="nav" style="margin-top:6px"><button data-n="-999">⏮</button><button data-n="-1">◀</button><button data-n="1">▶</button><button data-n="999">⏭</button> <span id="prog"></span></div></div>
+<div class="col"><div id="sum"></div><div id="info"></div><div id="moves"></div><button id="ask" hidden>Demander à Claude</button></div></div>
+<script type="module">
+import {Chess} from 'https://cdn.jsdelivr.net/npm/chess.js@1.0.0/+esm';
+const $=s=>document.querySelector(s),esc=s=>String(s).replace(/[&<>"]/g,c=>'&#'+c.charCodeAt(0)+';');
+const T={theory:['📖','Théorie','#a88865'],brilliant:['!!','Brillant','#1baca6'],great:['!','Très bon','#5c8bb0'],best:['★','Meilleur','#7fa650'],excellent:['✓','Excellent','#96bc4b'],good:['','Bon','#95b776'],inaccuracy:['?!','Imprécision','#f7c631'],miss:['✗','Occasion manquée','#ff7769'],mistake:['?','Erreur','#e58f2a'],blunder:['??','Gaffe','#ca3431']};
+const V={p:1,n:3,b:3,r:5,q:9,k:0},GL={p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚'},PN={p:'un pion',n:'un cavalier',b:'un fou',r:'une tour',q:'la dame',k:'le roi'};
+const wp=cp=>50+50*(2/(1+Math.exp(-0.00368208*cp))-1),epd=f=>f.split(' ').slice(0,4).join(' '),uciOf=m=>m.from+m.to+(m.promotion||'');
+const fmt=l=>l.mate!==undefined?'#'+l.mate:(l.cp/100>0?'+':'')+(l.cp/100).toFixed(2);
+let G=[],cur=null,ply=0,R=null,user='',ctl=null;const openMap=new Map();
+
+Promise.all([...'abcde'].map(c=>fetch('https://raw.githubusercontent.com/lichess-org/chess-openings/master/'+c+'.tsv').then(r=>r.text()))).then(p=>{const t=p.join('\n');for(const l of t.split('\n')){const [eco,name,pgn]=l.split('\t');if(!pgn||eco==='eco')continue;try{const c=new Chess();c.loadPgn(pgn);openMap.set(epd(c.fen()),eco+' '+name)}catch{}}});
+
+$('#f').onsubmit=async e=>{e.preventDefault();user=$('#u').value.trim();if(!user)return;$('#st').textContent='Chargement… (peut durer une minute)';
+ try{G=await loadGames(user);$('#st').textContent=G.length+' parties terminées';
+  $('#games').innerHTML=G.map((g,i)=>`<div class="g" data-i="${i}">${new Date(g.t*1000).toLocaleDateString('fr-FR')} · ${esc(g.w)} (${g.wr}) – ${esc(g.b)} (${g.br}) · ${esc((/\[Result "([^"]+)"/.exec(g.pgn)||[])[1]||'')}</div>`).join('')}
+ catch(x){$('#st').textContent='Erreur : '+x.message}};
+$('#games').onclick=e=>{const d=e.target.closest('.g');if(d)open(G[+d.dataset.i])};
+
+async function open(g){
+ sw&&sw.postMessage('stop');const c=new Chess();c.loadPgn(g.pgn);const hist=c.history({verbose:true});
+ const pos=hist.map(m=>({fen:m.before,uci:uciOf(m)}));let data=null;try{data=JSON.parse(localStorage['a'+depth()+':'+g.url])}catch{}
+ const me={g,hist,data:data||[]};cur=me;ply=0;R=null;draw();
+ me.depth=depth();if(!data){try{await startEngine();
+  for(let i=0;i<pos.length;i++){const d=await evalPos(pos[i],me.depth);if(cur!==me)return;me.data.push(d);$('#prog').textContent=`Analyse ${i+1}/${pos.length}…`}
+  try{localStorage['a'+depth()+':'+g.url]=JSON.stringify(me.data)}catch{}}catch(e){alert(e.message);return}}
+ if(cur===me){$('#prog').textContent='';compute();draw()}}
+
+
+const depth=()=>+$('#dp').value,CDN='https://cdn.jsdelivr.net/npm/stockfish@19.0.1/bin/stockfish-19-lite-single.';
+async function loadGames(u){const r=await fetch(`https://api.chess.com/pub/player/${encodeURIComponent(u.toLowerCase())}/games/archives`),a=await r.json();
+ if(!a.archives)throw new Error('pseudo introuvable');const out=[];let i=0;
+ for(const url of a.archives){$('#st').textContent=`Chargement ${++i}/${a.archives.length}…`;const m=await(await fetch(url)).json();
+  for(const g of m.games||[])if(g.rules==='chess'&&g.pgn&&g.end_time&&!/\[Result "\*"\]/.test(g.pgn))out.push({url:g.url,t:g.end_time,w:g.white.username,b:g.black.username,wr:g.white.rating,br:g.black.rating,pgn:g.pgn})}
+ return out.sort((x,y)=>y.t-x.t)}
+// Moteur Stockfish 19 (WebAssembly, lite) dans un Web Worker
+let sw=null,hd=null,lock=Promise.resolve();
+async function startEngine(){if(sw)return;let url;
+ try{if((await fetch('stockfish-19-lite-single.js',{method:'HEAD'})).ok)url='stockfish-19-lite-single.js'}catch{}
+ if(!url){const js=await(await fetch(CDN+'js')).text();
+  const shim=`const W='${CDN}wasm',R=u=>/\\.wasm(\\?|$)/.test(String(u&&u.url||u))?W:u,F=self.fetch;self.fetch=(u,...a)=>F(R(u),...a);const O=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u,...a){return O.call(this,m,R(u),...a)};\n`;
+  url=URL.createObjectURL(new Blob([shim,js],{type:'text/javascript'}))}
+ const w=new Worker(url);w.onmessage=e=>String(e.data).split('\n').forEach(l=>hd&&hd(l.trim()));
+ $('#prog').textContent='Chargement du moteur…';
+ await new Promise((ok,ko)=>{hd=l=>l==='readyok'&&ok();w.onerror=()=>ko(new Error('Le moteur Stockfish n\'a pas pu démarrer.'));setTimeout(()=>ko(new Error('Le moteur Stockfish ne répond pas (délai dépassé).')),40000);w.postMessage('uci');w.postMessage('isready')});
+ sw=w}
+function sfGo(fen,mpv,moves,dp){const run=()=>new Promise(res=>{const best={};
+  hd=s=>{if(s.startsWith('info')&&!/bound/.test(s)){const m=/depth (\d+).* multipv (\d+) score (cp|mate) (-?\d+).* pv (.+)$/.exec(s);
+    if(m){const v=+m[4],pv=m[5].split(' ');best[m[2]]={uci:pv[0],pv,mate:m[3]==='mate'?v:undefined,cp:m[3]==='cp'?v:Math.sign(v)*(10000-Math.abs(v))}}}
+   else if(s.startsWith('bestmove')){hd=null;res(Object.keys(best).sort().map(k=>best[k]))}};
+  sw.postMessage('setoption name MultiPV value '+mpv);sw.postMessage('position fen '+fen);sw.postMessage('go depth '+dp+(moves?' searchmoves '+moves:''))});
+ return lock=lock.then(run)}
+async function tablebase(fen){if(fen.split(' ')[0].replace(/[^a-zA-Z]/g,'').length>7)return null;
+ try{const j=await(await fetch('https://tablebase.lichess.ovh/standard?fen='+encodeURIComponent(fen))).json(),v=c=>c==='loss'?1e4:c==='win'?-1e4:0;
+  return j.moves.map(m=>({uci:m.uci,cp:v(m.category),pv:[m.uci]})).sort((a,b)=>b.cp-a.cp)}catch{return null}}
+async function evalPos({fen,uci},dp){const all=await tablebase(fen);let lines,src='stockfish';
+ if(all){lines=all.slice(0,2);src='tablebase'}else lines=await sfGo(fen,2,null,dp);
+ let played=(all||lines).find(l=>l.uci===uci);if(!played)played=(await sfGo(fen,1,uci,dp))[0];
+ return{lines,played,src}}
+// Net material lost if the piece just moved can be captured (0 = safe)
+function hang(m){const p=V[m.piece];if(p<3)return 0;const c=new Chess(m.after);let w=0;
+ for(const o of c.moves({verbose:true})){if(o.to!==m.to||!o.captured)continue;const c2=new Chess(m.after);c2.move(o.san);
+  const rec=c2.moves({verbose:true}).some(x=>x.to===m.to&&x.captured);w=Math.max(w,rec?p-V[o.piece]:p)}
+ return w-(m.captured?V[m.captured]:0)}
+
+function compute(){
+ const {g,hist,data}=cur,rs=[],S={w:{a:[],c:[],n:{}},b:{a:[],c:[],n:{}}};let prev='',opening='';
+ hist.forEach((m,i)=>{const d=data[i],col=m.color,rt=(col==='w'?g.wr:g.br)||1500,k=rt<1400?1.25:1,u=uciOf(m);
+  const b=d.lines[0],bw=wp(b.cp),pw=wp(d.played.cp),loss=Math.max(0,bw-pw),[t1,t2,t3,t4]=[2.5,6,12,22].map(x=>x*k);let cls;
+  const op=i<30&&openMap.get(epd(m.after));
+  if(op){cls='theory';opening=op}
+  else if(loss<=t1&&bw<92&&pw>=45&&hang(m)>=2)cls='brilliant';
+  else if(u===b.uci){cls='best';const s=d.lines[1];if(s&&bw-wp(s.cp)>=t3&&bw<97&&pw>20)cls='great'}
+  else cls=loss<=t1?'excellent':loss<=t2?'good':loss<=t3?'inaccuracy':loss<=t4?'mistake':'blunder';
+  if((cls==='inaccuracy'||cls==='mistake')&&(prev==='mistake'||prev==='blunder')&&bw>=55)cls='miss';
+  prev=cls;const s=S[col];s.a.push(Math.min(100,Math.max(0,103.1668*Math.exp(-0.04354*loss)-3.1669)));s.c.push(Math.min(1000,Math.max(0,b.cp-d.played.cp)));s.n[cls]=(s.n[cls]||0)+1;
+  rs.push({cls,loss,ev:col==='w'?pw:100-pw})});
+ const fin=s=>{const n=s.a.length||1,mean=s.a.reduce((x,y)=>x+y,0)/n,harm=n/s.a.reduce((x,y)=>x+1/Math.max(y,1),0),cpl=s.c.reduce((x,y)=>x+y,0)/n;
+  return{acc:(0.3*mean+0.7*harm).toFixed(1),elo:Math.max(100,Math.round(3100*Math.exp(-0.01*cpl))),n:s.n}};
+ R={rs,opening,w:fin(S.w),b:fin(S.b)}}
+
+function sanLine(fen,pv){const c=new Chess(fen),o=[];for(const u of pv){try{o.push(c.move({from:u.slice(0,2),to:u.slice(2,4),promotion:u[4]}).san)}catch{break}}return o.join(' ')}
+function why(fen,u){try{const c=new Chess(fen),mv=c.move({from:u.slice(0,2),to:u.slice(2,4),promotion:u[4]}),t=[];
+ if(mv.captured)t.push('prend '+PN[mv.captured]);if(c.isCheckmate())t.push('mat !');else if(c.inCheck())t.push('donne échec');if(mv.promotion)t.push('promeut en '+PN[mv.promotion]);
+ try{const p=c.fen().split(' ');p[1]=mv.color;p[3]='-';const c2=new Chess(p.join(' '));
+  const tg=c2.moves({verbose:true}).filter(o=>o.from===mv.to&&o.captured&&(V[o.captured]>=V[mv.piece]||!c.moves({verbose:true}).some(x=>x.to===o.to))).length;if(tg>=2)t.push('fourchette (attaque plusieurs pièces)')}catch{}
+ return t.join(', ')}catch{return''}}
+
+function draw(){
+ if(!cur)return;const {g,hist,data}=cur,c=new Chess(ply?hist[ply-1].after:undefined),flip=g.b.toLowerCase()===user.toLowerCase(),last=ply?hist[ply-1]:null,bd=c.board();let h='';
+ for(let r=0;r<8;r++)for(let f=0;f<8;f++){const rr=flip?7-r:r,ff=flip?7-f:f,p=bd[rr][ff],sq='abcdefgh'[ff]+(8-rr);
+  h+=`<div class="sq ${(rr+ff)%2?'d':'l'}${last&&(sq===last.from||sq===last.to)?' hl':''}">${p?`<span class="${p.color}">${GL[p.type]}\uFE0E</span>`:''}</div>`}
+ $('#bd').innerHTML=h;$('#top').innerHTML=`<b>${esc(g.w)}</b> (${g.wr}) – <b>${esc(g.b)}</b> (${g.br})${R&&R.opening?' · '+esc(R.opening):''}`;
+ let ev=50;if(R)ev=ply?R.rs[ply-1].ev:(data[0]?wp(data[0].lines[0].cp):50);$('#bw').style.height=ev+'%';$('#bar').style.transform=flip?'rotate(180deg)':'';
+ // résumé
+ if(R){const rows=Object.keys(T).map(k=>`<tr><td style="color:${T[k][2]}">${T[k][0]} ${T[k][1]}</td>${['w','b'].map(s=>`<td>${R[s].n[k]?`<span class="cl" data-c="${s}" data-k="${k}">${R[s].n[k]}</span>`:'·'}</td>`).join('')}</tr>`).join('');
+  $('#sum').innerHTML=`<table><tr><th></th><th>Blancs</th><th>Noirs</th></tr><tr><td>Précision</td><td>${R.w.acc}</td><td>${R.b.acc}</td></tr><tr><td>Elo estimé</td><td>~${R.w.elo}</td><td>~${R.b.elo}</td></tr>${rows}</table>`}
+ else $('#sum').innerHTML='';
+ $('#moves').innerHTML=hist.map((m,i)=>{const r=R&&R.rs[i],t=r&&T[r.cls];return`${i%2?'':`<span>${i/2+1}.</span>`}<span class="mv${i+1===ply?' on':''}" data-p="${i+1}" ${t?`style="color:${t[2]}"`:''}>${m.san}${t?t[0]:''}</span>`}).join('');
+ // détail du coup
+ let inf='';if(ply&&R){const m=hist[ply-1],r=R.rs[ply-1],d=data[ply-1],t=T[r.cls],b=d.lines[0];
+  inf=`<b style="color:${t[2]}">${Math.ceil(ply/2)}${m.color==='w'?'.':'…'} ${m.san} ${t[0]} ${t[1]}</b> · perte ${r.loss.toFixed(1)} % · éval ${fmt(d.played)}${d.src==='tablebase'?' (tables de finale)':''}`;
+  if(!['theory','best','great','brilliant','excellent'].includes(r.cls)){const w=why(m.before,b.uci),h=hang(m);
+   inf+=`<br>Meilleur : <b>${sanLine(m.before,[b.uci])}</b> (${fmt(b)})${w?' — '+w:''}<br>Suite : ${sanLine(m.before,b.pv.slice(0,6))}${h>=2?`<br>Ton coup laisse ${PN[m.piece]} en prise.`:''}`}}
+ else if(cur&&!R)inf='Analyse en cours… tu peux déjà naviguer.';
+ $('#info').innerHTML=inf;$('#ask').hidden=!(R&&ply)}
+$('#sum').onclick=e=>{const s=e.target.closest('.cl');if(!s)return;const idx=cur.hist.map((m,i)=>m.color===s.dataset.c&&R.rs[i].cls===s.dataset.k?i+1:0).filter(Boolean);ply=idx.find(i=>i>ply)||idx[0];draw()};
+$('#moves').onclick=e=>{const s=e.target.closest('.mv');if(s){ply=+s.dataset.p;draw()}};
+const go=n=>{if(!cur)return;ply=Math.max(0,Math.min(cur.hist.length,n==999?999:n==-999?0:ply+n));draw()};
+document.querySelector('.nav').onclick=e=>{if(e.target.dataset.n)go(+e.target.dataset.n)};
+document.onkeydown=e=>{if(e.target.tagName!=='INPUT'){if(e.key==='ArrowRight')go(1);if(e.key==='ArrowLeft')go(-1)}};
+$('#ask').onclick=async()=>{const m=cur.hist[ply-1],d=cur.data[ply-1],r=R.rs[ply-1],rt=(m.color==='w'?cur.g.wr:cur.g.br);
+ const txt=`Je joue aux échecs (environ ${rt} Elo). Position (FEN) avant mon coup, trait aux ${m.color==='w'?'Blancs':'Noirs'} :\n${m.before}\n\nJ'ai joué : ${m.san} (classé « ${T[r.cls][1]} », perte de ${r.loss.toFixed(1)} % de chances de gain, éval ${fmt(d.played)}).\n\nStockfish 19 (version lite, profondeur ${cur.depth}, évaluations du point de vue du camp qui joue) :\n${d.lines.map((l,i)=>`${i+1}) ${sanLine(m.before,l.pv.slice(0,8))} (${fmt(l)})`).join('\n')}\n\nExplique-moi en français simple pourquoi mon coup est moins bon, quelle idée j'ai manquée et quel plan suivre.`;
+ try{await navigator.clipboard.writeText(txt);$('#ask').textContent='Copié ! Colle-le sur claude.ai'}catch{prompt('Copie ce texte :',txt)}setTimeout(()=>$('#ask').textContent='Demander à Claude',3000)};
+</script></body></html>
